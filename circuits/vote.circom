@@ -9,20 +9,26 @@ include "merkle_tree.circom";
 // Proves:
 // 1. Voter knows secret & salt that hash to a commitment (leaf) in the Merkle tree
 // 2. Nullifier is correctly derived from secret, daoId, and proposalId (domain-separated)
-// 3. Vote choice is binary (0 or 1)
+// 3. Vote choice (candidate index) is within [0, numCandidates)
 //
-// Public signals: [root, nullifier, daoId, proposalId, voteChoice]
+// Public signals: [root, nullifier, daoId, proposalId, voteChoice, numCandidates]
 // Private signals: secret, salt, pathElements, pathIndices
 //
 // PRIVACY: Commitment is NOT exposed publicly. Votes are fully unlinkable across proposals.
 // Revocation is enforced via Merkle tree updates (zeroing leaves) rather than on-chain checks.
+//
+// SECURITY: numCandidates is a public input so the contract can verify the circuit enforced
+// the same candidate bound that the election was configured with. Without this binding,
+// a prover could supply a proof valid under one numCandidates value while the contract
+// tallies using a different (potentially larger) count.
 template Vote(levels) {
     // Public inputs
     signal input root;              // Merkle tree root (verified on-chain)
     signal input nullifier;         // Prevents double voting (domain-separated)
     signal input daoId;             // DAO identifier (for domain separation)
     signal input proposalId;        // Which proposal this vote is for
-    signal input voteChoice;        // 0 = against, 1 = for
+    signal input voteChoice;        // Candidate index the voter selected
+    signal input numCandidates;     // Total number of candidates (set by election config)
 
     // Private inputs
     signal input secret;            // Voter's secret (like password)
@@ -62,11 +68,16 @@ template Vote(levels) {
     // Constrain computed nullifier to match public nullifier
     nullifier === nullifierHasher.out;
 
-    // 4. Verify vote choice is binary (0 or 1)
-    voteChoice * (voteChoice - 1) === 0;
+    // 4. Verify candidate index is within bounds: voteChoice < numCandidates
+    // Uses 32-bit LessThan comparator from circomlib.
+    // This prevents a voter from proving a vote for a non-existent candidate.
+    component validChoice = LessThan(32);
+    validChoice.in[0] <== voteChoice;
+    validChoice.in[1] <== numCandidates;
+    validChoice.out === 1;
 }
 
 // Default tree depth of 18 (supports ~262K members)
-// Public signals: [root, nullifier, daoId, proposalId, voteChoice] - 5 signals
+// Public signals: [root, nullifier, daoId, proposalId, voteChoice, numCandidates] - 6 signals
 // Commitment is computed internally from secret+salt (private)
-component main {public [root, nullifier, daoId, proposalId, voteChoice]} = Vote(18);
+component main {public [root, nullifier, daoId, proposalId, voteChoice, numCandidates]} = Vote(18);
