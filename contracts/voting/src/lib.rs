@@ -104,6 +104,8 @@ pub enum VotingError {
     InsufficientRandomness = 37,
     RandomnessAlreadyRevealed = 38,
     RandomnessParticipantLimit = 39,
+    /// Candidate index >= numCandidates configured for this election
+    InvalidCandidateIndex = 40,
 }
 
 // Maximum allowed IC vector length (num_public_inputs + 1)
@@ -116,8 +118,8 @@ const MAX_TITLE_LEN: u32 = 100; // Max proposal title length (100 bytes)
 const MAX_CID_LEN: u32 = 64; // Max IPFS CID length (CIDv1 is ~59 chars)
 
 // Circuit constants
-/// Vote circuit public signals: nullifier, root, dao_id, proposal_id, vote_choice
-const NUM_PUBLIC_SIGNALS: u32 = 5;
+/// Vote circuit public signals: root, nullifier, dao_id, proposal_id, vote_choice, num_candidates
+const NUM_PUBLIC_SIGNALS: u32 = 6;
 // IC (inner commitment) vector length for Groth16 VK = num_public_inputs + 1
 const VOTE_CIRCUIT_IC_LEN: u32 = NUM_PUBLIC_SIGNALS + 1;
 pub const MAX_PAUSE_DURATION: u64 = 72 * 60 * 60;
@@ -196,6 +198,9 @@ pub struct ElectionConfig {
     pub min_balance: i128,
     pub twab_window: u64,
     pub candidate_seed: Option<BytesN<32>>,
+    /// Number of valid candidates. The circuit constrains voteChoice < num_candidates.
+    /// Must be set at election creation and cannot be changed after votes are cast.
+    pub num_candidates: u32,
 }
 
 #[contracttype]
@@ -1104,16 +1109,33 @@ impl Voting {
         }
 
         // Verify Groth16 proof
-        // Public signals: [root, nullifier, daoId, proposalId, voteChoice]
+        // Public signals: [root, nullifier, daoId, proposalId, voteChoice, numCandidates]
         // Note: daoId is included for domain separation (prevents cross-DAO nullifier linkability)
+        // numCandidates is bound into the proof to prevent circuit/contract candidate bound desync
         // Commitment is now private (computed internally in circuit) for improved vote unlinkability
-        let vote_signal = if vote_choice {
-            U256::from_u32(&env, 1)
-        } else {
-            U256::from_u32(&env, 0)
-        };
+        let election_config: ElectionConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ElectionConfig(dao_id, proposal_id))
+            .unwrap_or(ElectionConfig {
+                snapshot_ledger: 0,
+                min_balance: 0,
+                twab_window: 0,
+                candidate_seed: None,
+                num_candidates: 0,
+            });
+
+        let vote_choice_index: u32 = if vote_choice { 1 } else { 0 };
+        if election_config.num_candidates > 0
+            && vote_choice_index >= election_config.num_candidates
+        {
+            panic_with_error!(&env, VotingError::InvalidCandidateIndex);
+        }
+
+        let vote_signal = U256::from_u32(&env, vote_choice_index);
         let dao_signal = U256::from_u128(&env, dao_id as u128);
         let proposal_signal = U256::from_u128(&env, proposal_id as u128);
+        let num_candidates_signal = U256::from_u32(&env, election_config.num_candidates);
 
         let pub_signals = soroban_sdk::vec![
             &env,
@@ -1121,7 +1143,8 @@ impl Voting {
             nullifier.clone(),
             dao_signal,
             proposal_signal,
-            vote_signal
+            vote_signal,
+            num_candidates_signal,
         ];
 
         if !Self::verify_groth16(&env, &vk, &proof, &pub_signals) {
@@ -1247,13 +1270,29 @@ impl Voting {
             panic_with_error!(&env, VotingError::VkChanged);
         }
 
-        let vote_signal = if vote_choice {
-            U256::from_u32(&env, 1)
-        } else {
-            U256::from_u32(&env, 0)
-        };
+        let election_config: ElectionConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ElectionConfig(dao_id, proposal_id))
+            .unwrap_or(ElectionConfig {
+                snapshot_ledger: 0,
+                min_balance: 0,
+                twab_window: 0,
+                candidate_seed: None,
+                num_candidates: 0,
+            });
+
+        let vote_choice_index: u32 = if vote_choice { 1 } else { 0 };
+        if election_config.num_candidates > 0
+            && vote_choice_index >= election_config.num_candidates
+        {
+            panic_with_error!(&env, VotingError::InvalidCandidateIndex);
+        }
+
+        let vote_signal = U256::from_u32(&env, vote_choice_index);
         let dao_signal = U256::from_u128(&env, dao_id as u128);
         let proposal_signal = U256::from_u128(&env, proposal_id as u128);
+        let num_candidates_signal = U256::from_u32(&env, election_config.num_candidates);
 
         let pub_signals = soroban_sdk::vec![
             &env,
@@ -1262,6 +1301,7 @@ impl Voting {
             dao_signal,
             proposal_signal,
             vote_signal,
+            num_candidates_signal,
         ];
 
         if !Self::verify_groth16_bls381(&env, &vk, &proof, &pub_signals) {
@@ -1742,13 +1782,29 @@ impl Voting {
             }
         }
 
-        let vote_signal = if vote_choice {
-            U256::from_u32(&env, 1)
-        } else {
-            U256::from_u32(&env, 0)
-        };
+        let election_config: ElectionConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ElectionConfig(dao_id, proposal_id))
+            .unwrap_or(ElectionConfig {
+                snapshot_ledger: 0,
+                min_balance: 0,
+                twab_window: 0,
+                candidate_seed: None,
+                num_candidates: 0,
+            });
+
+        let vote_choice_index: u32 = if vote_choice { 1 } else { 0 };
+        if election_config.num_candidates > 0
+            && vote_choice_index >= election_config.num_candidates
+        {
+            panic_with_error!(&env, VotingError::InvalidCandidateIndex);
+        }
+
+        let vote_signal = U256::from_u32(&env, vote_choice_index);
         let dao_signal = U256::from_u128(&env, dao_id as u128);
         let proposal_signal = U256::from_u128(&env, proposal_id as u128);
+        let num_candidates_signal = U256::from_u32(&env, election_config.num_candidates);
 
         let pub_signals = soroban_sdk::vec![
             &env,
@@ -1757,6 +1813,7 @@ impl Voting {
             dao_signal,
             proposal_signal,
             vote_signal,
+            num_candidates_signal,
         ];
 
         if !Self::verify_groth16(&env, &vk, &proof, &pub_signals) {
@@ -1786,7 +1843,8 @@ impl Voting {
     // ── Anti-Flash Loan Protection ──────────────────────────────────────────
 
     /// Create or update election configuration with token-gating parameters.
-    /// Sets the minimum balance required to vote, snapshot ledger, and TWAB window.
+    /// Sets the minimum balance required to vote, snapshot ledger, TWAB window,
+    /// and the number of valid candidates (bound into the ZK proof).
     /// Only callable during proposal creation or by DAO admin.
     pub fn set_election_config(
         env: Env,
@@ -1794,6 +1852,7 @@ impl Voting {
         proposal_id: u64,
         min_balance: i128,
         twab_window: u64,
+        num_candidates: u32,
     ) {
         Self::bump_instance(&env);
         Self::require_not_paused(&env);
@@ -1809,6 +1868,7 @@ impl Voting {
             min_balance,
             twab_window,
             candidate_seed,
+            num_candidates,
         };
         env.storage().persistent().set(&key, &config);
         Self::bump_persistent(&env, &key);
@@ -1823,6 +1883,14 @@ impl Voting {
             Self::bump_persistent(&env, &key);
         }
         config
+    }
+
+    /// Get the number of valid candidates for a proposal's election.
+    /// Returns 0 if no election config is set (backward-compatible default).
+    pub fn get_num_candidates(env: Env, dao_id: u64, proposal_id: u64) -> u32 {
+        Self::get_election_config(env, dao_id, proposal_id)
+            .map(|c| c.num_candidates)
+            .unwrap_or(0)
     }
 
     /// Get the snapshot ledger for a proposal (from ProposalInfo).
@@ -2165,6 +2233,7 @@ impl Voting {
                     min_balance: 0,
                     twab_window: 0,
                     candidate_seed: None,
+                    num_candidates: 0,
                 });
         if config.candidate_seed.is_some() {
             panic_with_error!(&env, VotingError::CandidateSeedFinalized);
